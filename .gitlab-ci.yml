@@ -1,0 +1,113 @@
+stages:
+  - ci
+  - deploy_staging
+  - deploy_production
+
+default:
+  tags:
+    - self-hosted
+    - linux
+
+variables:
+  APP_IMAGE: geococo
+  CI_TEST_CONTAINER: geococo-ci-test
+  STAGING_CONTAINER: geococo-staging
+  PROD_CONTAINER: geococo-prod
+  CONTAINER_PORT: "8000"
+  HEALTH_PATH: "/health"
+
+ci_docker_healthcheck:
+  stage: ci
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - |
+      bash -lc '
+        set -euo pipefail
+
+        IMAGE_TAG="${APP_IMAGE}:ci-${CI_COMMIT_SHA}"
+
+        docker build -t "${IMAGE_TAG}" .
+        docker rm -f "${CI_TEST_CONTAINER}" || true
+
+        docker run -d --name "${CI_TEST_CONTAINER}" -p 18000:${CONTAINER_PORT} "${IMAGE_TAG}"
+
+        for i in $(seq 1 30); do
+          if curl --fail --silent --show-error "http://127.0.0.1:18000${HEALTH_PATH}" >/dev/null; then
+            echo "CI health check passed"
+            exit 0
+          fi
+          sleep 2
+        done
+
+        echo "CI health check failed"
+        docker logs "${CI_TEST_CONTAINER}" || true
+        exit 1
+      '
+  after_script:
+    - |
+      bash -lc '
+        set -euo pipefail
+        docker rm -f "${CI_TEST_CONTAINER}" || true
+      '
+
+deploy_staging:
+  stage: deploy_staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - |
+      bash -lc '
+        set -euo pipefail
+
+        IMAGE_TAG="${APP_IMAGE}:${CI_COMMIT_SHA}"
+
+        docker build -t "${IMAGE_TAG}" .
+        docker rm -f "${STAGING_CONTAINER}" || true
+        docker run -d --name "${STAGING_CONTAINER}" -p 8001:${CONTAINER_PORT} "${IMAGE_TAG}"
+
+        for i in $(seq 1 30); do
+          if curl --fail --silent --show-error "http://127.0.0.1:8001${HEALTH_PATH}" >/dev/null; then
+            echo "Staging health check passed"
+            exit 0
+          fi
+          sleep 2
+        done
+
+        echo "Staging health check failed"
+        docker logs "${STAGING_CONTAINER}" || true
+        exit 1
+      '
+
+deploy_production:
+  stage: deploy_production
+  needs:
+    - deploy_staging
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - |
+      bash -lc '
+        set -euo pipefail
+
+        IMAGE_TAG="${APP_IMAGE}:${CI_COMMIT_SHA}"
+
+        docker build -t "${IMAGE_TAG}" .
+        docker rm -f "${PROD_CONTAINER}" || true
+        docker run -d --name "${PROD_CONTAINER}" -p 8000:${CONTAINER_PORT} "${IMAGE_TAG}"
+
+        for i in $(seq 1 30); do
+          if curl --fail --silent --show-error "http://127.0.0.1:8000${HEALTH_PATH}" >/dev/null; then
+            echo "Production health check passed"
+            exit 0
+          fi
+          sleep 2
+        done
+
+        echo "Production health check failed"
+        docker logs "${PROD_CONTAINER}" || true
+        exit 1
+      '
